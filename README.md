@@ -36,10 +36,17 @@ Returns:
 {"status": "ok"}
 ```
 
-## Stage 0 Scope
+## API
 
-- In-memory job store (`create_job`, `get_job`, `update_job`)
-- FastAPI health endpoint
-- Placeholder worker and config
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check |
+| POST | `/jobs` | Create a job (202 Accepted) |
+| GET | `/jobs/{job_id}` | Get job status (404 if missing) |
+
+## Stages
+
+- **Stage 0** — Project foundation (job store, config, worker placeholders)
+- **Stage 1** — Job creation and status lookup
 
 Not included yet: background tasks, Celery/Redis, AI calls, retries, authentication.
