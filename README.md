@@ -7,7 +7,7 @@ Foundation for a background job processing system.
 ```
 main.py          # FastAPI application (API routes, starts background work)
 jobs.py          # In-memory job store and state management
-worker.py        # Job execution logic
+worker.py        # Job execution logic (with retries)
 config.py        # Configuration values
 requirements.txt # Python dependencies
 ```
@@ -32,15 +32,29 @@ uvicorn main:app --reload
 | POST | `/jobs` | Create a job and start background processing (202 Accepted) |
 | GET | `/jobs/{job_id}` | Get job status and metadata (404 if missing) |
 
+### Create a job
+
+```bash
+curl -X POST http://localhost:8000/jobs
+```
+
+Force a failing job (for retry testing):
+
+```bash
+curl -X POST http://localhost:8000/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"should_fail": true}'
+```
+
 ## Background Processing Flow
 
 1. Client calls `POST /jobs`
-2. API creates a job with status `queued` and a `created_at` timestamp
+2. API creates a job with status `queued`, `created_at`, and `attempts: 0`
 3. API schedules `process_job(job_id)` via FastAPI `BackgroundTasks`
-4. API returns **202 Accepted** immediately (does not wait for work to finish)
-5. Worker sets status to `running` (`started_at` recorded)
-6. Worker marks the job `completed` or `failed` (`completed_at` recorded)
-7. Client polls `GET /jobs/{job_id}` to check progress and metadata
+4. API returns **202 Accepted** immediately
+5. Worker runs attempts (up to `MAX_RETRIES`), setting status to `running`
+6. On success → `completed`; after all retries fail → `failed`
+7. Client polls `GET /jobs/{job_id}` for status and metadata
 
 ## Job Lifecycle
 
@@ -51,19 +65,40 @@ queued → running → completed
 
 ### `queued`
 Job accepted by API. Waiting for the worker to pick it up.
-Timestamps: `created_at` set; `started_at` and `completed_at` are `null`.
 
 ### `running`
 Worker is processing the task.
-Timestamps: `started_at` set.
 
 ### `completed`
 Work finished successfully. `result` contains the outcome.
-Timestamps: `completed_at` set.
 
 ### `failed`
-Worker encountered an error. `error` contains the message.
-Timestamps: `completed_at` set.
+Worker exhausted retries. `error` retains the last error message.
+
+## Retry Lifecycle
+
+```
+running
+  ↓
+failure
+  ↓
+retry (attempts++)
+  ↓
+completed  OR  failed (after MAX_RETRIES)
+```
+
+- Each attempt increments `attempts` and re-enters `running`
+- Maximum attempts: `MAX_RETRIES` (default **3**) from `config.py`
+- Intermediate failures store the error message but keep retrying
+- After the final failed attempt, status becomes `failed` and `error` is kept
+- Successful jobs stop retrying immediately
+
+## Configuration
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `JOB_PROCESSING_DELAY` | `5` | Simulated work duration (seconds) |
+| `MAX_RETRIES` | `3` | Maximum execution attempts per job |
 
 ## Stages
 
@@ -71,5 +106,6 @@ Timestamps: `completed_at` set.
 - **Stage 1** — Job creation and status lookup
 - **Stage 2** — Background worker execution (non-blocking API)
 - **Stage 3** — Lifecycle metadata and status reporting
+- **Stage 4** — Retry handling and failure management
 
-Not included yet: Celery/Redis, retries, idempotency, AI calls, authentication.
+Not included yet: Celery/Redis, idempotency, AI calls, authentication.

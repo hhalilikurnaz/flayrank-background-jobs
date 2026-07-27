@@ -10,7 +10,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_job() -> dict:
+def create_job(should_fail: bool = False) -> dict:
     """Create a new job and store it in memory."""
     job = {
         "id": str(uuid4()),
@@ -20,6 +20,8 @@ def create_job() -> dict:
         "created_at": _now_iso(),
         "started_at": None,
         "completed_at": None,
+        "attempts": 0,
+        "should_fail": should_fail,
     }
     _jobs[job["id"]] = job
     return job
@@ -33,7 +35,7 @@ def get_job(job_id: str) -> dict | None:
 def update_job(job_id: str, data: dict) -> dict | None:
     """Update an existing job with the given data. Returns None if not found.
 
-    Automatically sets started_at when status becomes running,
+    Automatically sets started_at on first transition to running,
     and completed_at when status becomes completed or failed.
     """
     job = _jobs.get(job_id)
@@ -41,7 +43,7 @@ def update_job(job_id: str, data: dict) -> dict | None:
         return None
 
     new_status = data.get("status")
-    if new_status == "running":
+    if new_status == "running" and job.get("started_at") is None:
         data = {**data, "started_at": _now_iso()}
     elif new_status in ("completed", "failed"):
         data = {**data, "completed_at": _now_iso()}
