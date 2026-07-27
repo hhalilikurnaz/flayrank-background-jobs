@@ -6,8 +6,8 @@ Foundation for a background job processing system.
 
 ```
 main.py          # FastAPI application (API routes, starts background work)
-jobs.py          # In-memory job store and state management
-worker.py        # Job execution logic (with retries)
+jobs.py          # In-memory job store, state management, and locking
+worker.py        # Job execution logic (with retries and locks)
 config.py        # Configuration values
 requirements.txt # Python dependencies
 ```
@@ -49,12 +49,13 @@ curl -X POST http://localhost:8000/jobs \
 ## Background Processing Flow
 
 1. Client calls `POST /jobs`
-2. API creates a job with status `queued`, `created_at`, and `attempts: 0`
+2. API creates a job with status `queued`, `locked: false`, and `attempts: 0`
 3. API schedules `process_job(job_id)` via FastAPI `BackgroundTasks`
 4. API returns **202 Accepted** immediately
-5. Worker runs attempts (up to `MAX_RETRIES`), setting status to `running`
+5. Worker acquires the job lock, then runs attempts (up to `MAX_RETRIES`)
 6. On success → `completed`; after all retries fail → `failed`
-7. Client polls `GET /jobs/{job_id}` for status and metadata
+7. Worker releases the lock (always, via `try`/`finally`)
+8. Client polls `GET /jobs/{job_id}` for status and metadata
 
 ## Job Lifecycle
 
@@ -93,6 +94,20 @@ completed  OR  failed (after MAX_RETRIES)
 - After the final failed attempt, status becomes `failed` and `error` is kept
 - Successful jobs stop retrying immediately
 
+## Idempotency
+
+Jobs cannot be processed concurrently twice.
+
+- Before execution, the worker calls `acquire_job_lock(job_id)`
+- If the job is already locked, the second worker exits immediately without changing state
+- Only one worker runs the job; results are not duplicated
+- The lock is always released after completion or failure (`try`/`finally`)
+
+```
+worker A: acquire lock → process → release lock
+worker B: acquire lock fails → exit (no state change)
+```
+
 ## Configuration
 
 | Setting | Default | Meaning |
@@ -107,5 +122,6 @@ completed  OR  failed (after MAX_RETRIES)
 - **Stage 2** — Background worker execution (non-blocking API)
 - **Stage 3** — Lifecycle metadata and status reporting
 - **Stage 4** — Retry handling and failure management
+- **Stage 5** — Idempotency via job locking
 
-Not included yet: Celery/Redis, idempotency, AI calls, authentication.
+Not included yet: Celery/Redis, database persistence, AI calls, authentication.

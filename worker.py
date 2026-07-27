@@ -7,48 +7,54 @@ import jobs
 
 
 def process_job(job_id: str) -> None:
-    """Execute a job in the background with retry handling.
+    """Execute a job in the background with retry handling and locking.
 
     Lifecycle: queued → running → (retry on failure) → completed | failed
     """
-    job = jobs.get_job(job_id)
-    if job is None:
+    if not jobs.acquire_job_lock(job_id):
         return
 
-    last_error: str | None = None
-
-    for _ in range(config.MAX_RETRIES):
+    try:
         job = jobs.get_job(job_id)
         if job is None:
             return
 
-        attempts = job.get("attempts", 0) + 1
-        jobs.update_job(job_id, {"attempts": attempts, "status": "running"})
+        last_error: str | None = None
 
-        try:
-            time.sleep(config.JOB_PROCESSING_DELAY)
-
+        for _ in range(config.MAX_RETRIES):
             job = jobs.get_job(job_id)
-            if job is not None and job.get("should_fail"):
-                raise RuntimeError("Simulated job failure")
+            if job is None:
+                return
 
-            jobs.update_job(
-                job_id,
-                {
-                    "status": "completed",
-                    "result": "Job completed successfully",
-                    "error": None,
-                },
-            )
-            return
-        except Exception as exc:
-            last_error = str(exc)
-            jobs.update_job(job_id, {"error": last_error})
+            attempts = job.get("attempts", 0) + 1
+            jobs.update_job(job_id, {"attempts": attempts, "status": "running"})
 
-    jobs.update_job(
-        job_id,
-        {
-            "status": "failed",
-            "error": last_error,
-        },
-    )
+            try:
+                time.sleep(config.JOB_PROCESSING_DELAY)
+
+                job = jobs.get_job(job_id)
+                if job is not None and job.get("should_fail"):
+                    raise RuntimeError("Simulated job failure")
+
+                jobs.update_job(
+                    job_id,
+                    {
+                        "status": "completed",
+                        "result": "Job completed successfully",
+                        "error": None,
+                    },
+                )
+                return
+            except Exception as exc:
+                last_error = str(exc)
+                jobs.update_job(job_id, {"error": last_error})
+
+        jobs.update_job(
+            job_id,
+            {
+                "status": "failed",
+                "error": last_error,
+            },
+        )
+    finally:
+        jobs.release_job_lock(job_id)

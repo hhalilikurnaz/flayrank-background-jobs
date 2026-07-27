@@ -1,9 +1,11 @@
 """In-memory job store for background job processing."""
 
+import threading
 from datetime import datetime, timezone
 from uuid import uuid4
 
 _jobs: dict[str, dict] = {}
+_lock = threading.Lock()
 
 
 def _now_iso() -> str:
@@ -21,6 +23,7 @@ def create_job(should_fail: bool = False) -> dict:
         "started_at": None,
         "completed_at": None,
         "attempts": 0,
+        "locked": False,
         "should_fail": should_fail,
     }
     _jobs[job["id"]] = job
@@ -50,3 +53,27 @@ def update_job(job_id: str, data: dict) -> dict | None:
 
     job.update(data)
     return job
+
+
+def acquire_job_lock(job_id: str) -> bool:
+    """Try to lock a job for exclusive processing.
+
+    Returns False if the job does not exist or is already locked.
+    """
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return False
+        if job.get("locked"):
+            return False
+        job["locked"] = True
+        return True
+
+
+def release_job_lock(job_id: str) -> None:
+    """Release the processing lock on a job."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job["locked"] = False
