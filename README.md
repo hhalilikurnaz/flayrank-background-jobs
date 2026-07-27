@@ -1,127 +1,379 @@
-# Background Jobs
+# FlyRank Background Jobs
 
-Foundation for a background job processing system.
+## Case Study: Building a Reliable Background Job Processing System
 
-## Project Structure
+## Problem
+
+Many backend systems need to execute operations that are too slow to run inside a normal HTTP request.
+
+Examples:
+
+- AI model calls
+- Report generation
+- Large file processing
+- External API integrations
+- Data processing tasks
+
+Running these operations directly inside an API request creates problems:
+
+- Slow response times
+- Request timeouts
+- Poor user experience
+- Difficult failure management
+
+A more scalable approach is:
+
+**Accept the request quickly → Process asynchronously → Report the result**
+
+---
+
+# Solution Overview
+
+This project implements a background job processing pattern.
+
+Instead of keeping the client waiting for a long-running operation:
+
+1. Client submits a job.
+2. API creates a job record.
+3. API immediately returns `202 Accepted`.
+4. Background worker processes the task.
+5. Client checks job status separately.
+
+The system demonstrates:
+
+- Background execution
+- Job lifecycle tracking
+- Retry handling
+- Failure management
+- Idempotent processing
+
+---
+
+# Architecture
+
+```text
+Client
+  |
+  | POST /jobs
+  ↓
+FastAPI API
+  |
+  | Create Job
+  ↓
+Job Store
+  |
+  | Background Worker
+  ↓
+Processing
+  |
+  ↓
+Completed / Failed
+```
+
+Execution flow:
+
+1. The client sends a job request.
+2. The API creates a queued job.
+3. The worker executes the operation asynchronously.
+4. Job state is updated during processing.
+5. The client retrieves the result through the status endpoint.
+
+---
+
+# Engineering Decisions
+
+## 1. Asynchronous Processing
+
+### Problem
+
+Long-running operations should not block HTTP requests.
+
+### Decision
+
+The API only accepts the task and delegates execution to a background worker.
+
+The endpoint responds immediately:
 
 ```
-main.py          # FastAPI application (API routes, starts background work)
-jobs.py          # In-memory job store, state management, and locking
-worker.py        # Job execution logic (with retries and locks)
-config.py        # Configuration values
-requirements.txt # Python dependencies
+POST /jobs
+
+→ 202 Accepted
+→ background processing starts
 ```
 
-## Setup
+This keeps the API responsive.
+
+---
+
+## 2. Job Lifecycle Tracking
+
+Each job maintains its execution state:
+
+```
+queued
+   ↓
+running
+   ↓
+completed
+```
+
+or:
+
+```
+queued
+   ↓
+running
+   ↓
+failed
+```
+
+Supported states:
+
+| Status | Description |
+|---|---|
+| `queued` | Job accepted and waiting for processing |
+| `running` | Worker is executing the task |
+| `completed` | Processing finished successfully |
+| `failed` | Processing failed after retries |
+
+Jobs also track:
+
+- `created_at`
+- `started_at`
+- `completed_at`
+- `attempts`
+- `locked`
+
+---
+
+# Retry and Failure Handling
+
+Background jobs can fail because of:
+
+- Temporary network errors
+- External service failures
+- Unexpected runtime errors
+
+The worker retries failed operations automatically.
+
+Lifecycle:
+
+```
+running
+   ↓
+failure
+   ↓
+retry attempt
+   ↓
+completed OR failed
+```
+
+Features:
+
+- Configurable maximum retries
+- Attempt counter tracking
+- Error message preservation
+- Final failure state
+
+Configuration:
+
+```python
+MAX_RETRIES = 3
+```
+
+---
+
+# Idempotency
+
+A production system must assume:
+
+> The same job can be triggered more than once.
+
+Without protection:
+
+```
+Worker A → executes job
+Worker B → executes same job again
+```
+
+This can create duplicate operations.
+
+To prevent this, jobs use locking.
+
+Flow:
+
+```
+Worker 1
+   |
+ acquire lock ✅
+   |
+ process job
+
+
+Worker 2
+   |
+ acquire lock ❌
+   |
+ stop
+```
+
+The lock is always released after completion or failure.
+
+---
+
+# API Documentation
+
+## Create Job
+
+### POST `/jobs`
+
+Creates a new background job.
+
+Response:
+
+```
+202 Accepted
+```
+
+Example:
+
+```json
+{
+  "id": "uuid",
+  "status": "queued",
+  "result": null,
+  "error": null
+}
+```
+
+Failure simulation for testing:
+
+```bash
+curl -X POST http://localhost:8000/jobs \
+-H "Content-Type: application/json" \
+-d '{"should_fail": true}'
+```
+
+---
+
+## Check Job Status
+
+### GET `/jobs/{job_id}`
+
+Returns the current job state.
+
+Response example:
+
+```json
+{
+  "id": "uuid",
+  "status": "completed",
+  "result": "Job completed successfully",
+  "error": null
+}
+```
+
+Returns:
+
+- `200` if job exists
+- `404` if job is missing
+
+---
+
+## Health Check
+
+### GET `/health`
+
+Response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+# File Responsibilities
+
+| File | Responsibility |
+|---|---|
+| `main.py` | API routes and starting background execution |
+| `jobs.py` | Job storage, lifecycle management, locking |
+| `worker.py` | Background execution, retries, failures |
+| `config.py` | Worker and retry configuration |
+
+---
+
+# Running Locally
+
+Create environment:
+
+```bash
+python -m venv .venv
+```
+
+Activate:
+
+```bash
+source .venv/bin/activate
+```
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Run
+Run API:
 
 ```bash
 uvicorn main:app --reload
 ```
 
-## API
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| POST | `/jobs` | Create a job and start background processing (202 Accepted) |
-| GET | `/jobs/{job_id}` | Get job status and metadata (404 if missing) |
-
-### Create a job
-
-```bash
-curl -X POST http://localhost:8000/jobs
-```
-
-Force a failing job (for retry testing):
-
-```bash
-curl -X POST http://localhost:8000/jobs \
-  -H "Content-Type: application/json" \
-  -d '{"should_fail": true}'
-```
-
-## Background Processing Flow
-
-1. Client calls `POST /jobs`
-2. API creates a job with status `queued`, `locked: false`, and `attempts: 0`
-3. API schedules `process_job(job_id)` via FastAPI `BackgroundTasks`
-4. API returns **202 Accepted** immediately
-5. Worker acquires the job lock, then runs attempts (up to `MAX_RETRIES`)
-6. On success → `completed`; after all retries fail → `failed`
-7. Worker releases the lock (always, via `try`/`finally`)
-8. Client polls `GET /jobs/{job_id}` for status and metadata
-
-## Job Lifecycle
+Open:
 
 ```
-queued → running → completed
-                 ↘ failed
+http://localhost:8000/docs
 ```
 
-### `queued`
-Job accepted by API. Waiting for the worker to pick it up.
+---
 
-### `running`
-Worker is processing the task.
-
-### `completed`
-Work finished successfully. `result` contains the outcome.
-
-### `failed`
-Worker exhausted retries. `error` retains the last error message.
-
-## Retry Lifecycle
+# Project Structure
 
 ```
-running
-  ↓
-failure
-  ↓
-retry (attempts++)
-  ↓
-completed  OR  failed (after MAX_RETRIES)
+.
+├── main.py
+├── jobs.py
+├── worker.py
+├── config.py
+├── requirements.txt
+└── README.md
 ```
 
-- Each attempt increments `attempts` and re-enters `running`
-- Maximum attempts: `MAX_RETRIES` (default **3**) from `config.py`
-- Intermediate failures store the error message but keep retrying
-- After the final failed attempt, status becomes `failed` and `error` is kept
-- Successful jobs stop retrying immediately
+---
 
-## Idempotency
+# Configuration
 
-Jobs cannot be processed concurrently twice.
+| Setting | Default | Description |
+|---|---|---|
+| `JOB_PROCESSING_DELAY` | `5` | Simulated long-running operation duration |
+| `MAX_RETRIES` | `3` | Maximum retry attempts |
 
-- Before execution, the worker calls `acquire_job_lock(job_id)`
-- If the job is already locked, the second worker exits immediately without changing state
-- Only one worker runs the job; results are not duplicated
-- The lock is always released after completion or failure (`try`/`finally`)
+---
 
-```
-worker A: acquire lock → process → release lock
-worker B: acquire lock fails → exit (no state change)
-```
+# Future Production Improvements
 
-## Configuration
+This project currently uses an in-memory job store for learning and demonstration.
 
-| Setting | Default | Meaning |
-|---------|---------|---------|
-| `JOB_PROCESSING_DELAY` | `5` | Simulated work duration (seconds) |
-| `MAX_RETRIES` | `3` | Maximum execution attempts per job |
+A production-ready version could add:
 
-## Stages
+- Redis Queue / Celery
+- Persistent database storage
+- Distributed workers
+- Job monitoring dashboard
+- Alerting system
+- Metrics and tracing
+- Dead letter queues
 
-- **Stage 0** — Project foundation (job store, config, worker placeholders)
-- **Stage 1** — Job creation and status lookup
-- **Stage 2** — Background worker execution (non-blocking API)
-- **Stage 3** — Lifecycle metadata and status reporting
-- **Stage 4** — Retry handling and failure management
-- **Stage 5** — Idempotency via job locking
-
-Not included yet: Celery/Redis, database persistence, AI calls, authentication.
+The goal of this project is to demonstrate the core architecture behind reliable asynchronous processing systems.
